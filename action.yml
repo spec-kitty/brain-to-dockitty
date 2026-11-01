@@ -1,0 +1,121 @@
+name: brain-to-dockitty
+description: Export a Brain's ratified content as a DocKitty docs tree, and optionally build the doc-kitty site.
+author: Spec Kitty, Inc.
+branding:
+  icon: book-open
+  color: purple
+
+inputs:
+  brain-dir:
+    description: Path to the Brain folder in the caller's repository (the folder holding nodes/, scopes/ and .brainkitty/brain.json).
+    required: true
+  site-dir:
+    description: Where to write the site. The docs tree goes to <site-dir>/docs; site files that already exist are never overwritten.
+    default: brain-site
+  scopes:
+    description: Scopes to export, separated by commas or newlines.
+    default: foundation
+  source-urls:
+    description: One --source-url rule per line (prefix=url-prefix, or a ^regex=url with $1 groups).
+    default: ''
+  llms:
+    description: Roles listed in llms.txt and the agent API.
+    default: frame,commitment
+  title:
+    description: Site title. Defaults to "<Brain name> (Brain)".
+    default: ''
+  site-url:
+    description: The site's canonical URL, e.g. https://my-org.github.io.
+    default: ''
+  base:
+    description: Base path, e.g. /my-repo for a GitHub Pages project site.
+    default: ''
+  toolkit:
+    description: '@spec-kitty/doc-toolkit version written into a scaffolded package.json.'
+    default: ^0.5.0
+  build:
+    description: Also install the site's dependencies and run the doc-kitty build.
+    default: 'false'
+  packages-token:
+    description: >-
+      Token with read:packages, used only when build is true: @spec-kitty/doc-toolkit comes from the GitHub
+      Packages registry. Pass a secret; it is written to the runner's user-level .npmrc, never to the site.
+    default: ''
+  node-version:
+    description: Node.js version to run with.
+    default: '22'
+
+outputs:
+  docs-dir:
+    description: The exported docs tree.
+    value: ${{ steps.export.outputs.docs-dir }}
+  site-dir:
+    description: The site folder.
+    value: ${{ steps.export.outputs.site-dir }}
+  dist-dir:
+    description: The built site, when build is true.
+    value: ${{ steps.export.outputs.dist-dir }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Install the exporter
+      shell: bash
+      run: |
+        set -euo pipefail
+        corepack enable
+        cd "$GITHUB_ACTION_PATH"
+        pnpm install --frozen-lockfile --prod
+
+    - name: Export the Brain
+      id: export
+      shell: bash
+      # Inputs travel as environment variables, never interpolated into the script.
+      env:
+        BRAIN_DIR: ${{ inputs.brain-dir }}
+        SITE_DIR: ${{ inputs.site-dir }}
+        SCOPES: ${{ inputs.scopes }}
+        SOURCE_URLS: ${{ inputs.source-urls }}
+        LLMS: ${{ inputs.llms }}
+        TITLE: ${{ inputs.title }}
+        SITE_URL: ${{ inputs.site-url }}
+        BASE_PATH: ${{ inputs.base }}
+        TOOLKIT: ${{ inputs.toolkit }}
+      run: |
+        set -euo pipefail
+        trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; printf '%s' "${s%"${s##*[![:space:]]}"}"; }
+        args=("$BRAIN_DIR" --site "$SITE_DIR" --llms "$LLMS" --toolkit "$TOOLKIT")
+        while IFS= read -r s; do s="$(trim "$s")"; [ -n "$s" ] && args+=(--scope "$s"); done <<< "${SCOPES//,/$'\n'}"
+        while IFS= read -r r; do r="$(trim "$r")"; [ -n "$r" ] && args+=(--source-url "$r"); done <<< "$SOURCE_URLS"
+        if [ -n "$TITLE" ]; then args+=(--title "$TITLE"); fi
+        if [ -n "$SITE_URL" ]; then args+=(--site-url "$SITE_URL"); fi
+        if [ -n "$BASE_PATH" ]; then args+=(--base "$BASE_PATH"); fi
+        node "$GITHUB_ACTION_PATH/bin/brain-to-dockitty.mjs" "${args[@]}"
+        {
+          echo "docs-dir=$SITE_DIR/docs"
+          echo "site-dir=$SITE_DIR"
+          echo "dist-dir=$SITE_DIR/dist"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Build the site
+      if: inputs.build == 'true'
+      shell: bash
+      working-directory: ${{ inputs.site-dir }}
+      env:
+        PACKAGES_TOKEN: ${{ inputs.packages-token }}
+      run: |
+        set -euo pipefail
+        if [ -z "$PACKAGES_TOKEN" ]; then
+          echo "::error::build: true needs packages-token (read:packages) to install @spec-kitty/doc-toolkit"
+          exit 1
+        fi
+        [ -f .npmrc ] || echo '@spec-kitty:registry=https://npm.pkg.github.com' > .npmrc
+        # pnpm does not expand variables in a project .npmrc, so the token goes in the user-level one.
+        printf '//npm.pkg.github.com/:_authToken=%s\n' "$PACKAGES_TOKEN" >> "$HOME/.npmrc"
+        corepack enable
+        pnpm install --no-frozen-lockfile
+        pnpm build

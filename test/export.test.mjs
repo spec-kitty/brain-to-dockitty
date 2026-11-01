@@ -90,8 +90,46 @@ test('llms.txt lists axes and decisions by default; --llms widens it', () => {
 
 test('--scope adds scopes beyond foundation', () => {
   const { docs, stats } = exportTo(['--scope', 'foundation', '--scope', 'team-a']);
-  assert.equal(stats.pages, 5);
-  assert.equal(page(docs, 'decisions/team-a-rule.md').fm.brain.scope, 'team-a');
+  assert.equal(stats.pages, 6);
+  const { fm, body } = page(docs, 'decisions/team-a-rule.md');
+  assert.equal(fm.brain.scope, 'team-a');
+  assert.match(body, /> \[!NOTE\]\n> Applies in scope \*\*Team A\*\*, on top of \*\*Foundation\*\*\./);
+});
+
+test('overrides render on both pages only when both scopes are exported', () => {
+  const { docs, stats } = exportTo(['--scope', 'foundation', '--scope', 'team-a']);
+  // An `overrides` edge up the chain (team-a -> foundation), with a reason.
+  const overriding = page(docs, 'decisions/team-a-rule.md').body;
+  assert.match(overriding, /> \[!IMPORTANT\]\n> In scope \*\*Team A\*\*, this decision overrides \[A release needs two approvals\]\(\.\.\/decisions\/two-approvals\.md\) from \*\*Foundation\*\*\. Reason: \[Team A customer SLA\]\(\.\.\/decisions\/team-a-sla\.md\)\./);
+  const ground = page(docs, 'decisions/two-approvals.md').body;
+  assert.match(ground, /> Overridden in scope \*\*Team A\*\* by \[Team A ships on Fridays\]\(\.\.\/decisions\/team-a-rule\.md\)\. Reason: \[Team A customer SLA\]/);
+  // An override entity (overrides/) shows its title, reason and body on the target page.
+  const hotfix = page(docs, 'rules/hotfix-rule.md').body;
+  assert.match(hotfix, /> Overridden in scope \*\*Team A\*\*: \*\*Team A hotfixes any customer-visible outage\*\*\. Reason: \[Team A customer SLA\]/);
+  assert.match(hotfix, /> Within Team A, any customer-visible outage qualifies for a hotfix/);
+  // The callouts sit directly under the title.
+  assert.match(hotfix, /^# When to hotfix instead of waiting\n\n> \[!NOTE\]/m);
+  // A same-scope `overrides` edge is not up the chain: misdeclared, not rendered.
+  assert.equal(stats.misdeclaredOverrides, 1);
+  assert.equal(stats.overrides, 2);
+  assert.doesNotMatch(page(docs, 'decisions/team-a-sla.md').body, /\[!IMPORTANT\]/);
+
+  const foundationOnly = exportTo();
+  assert.doesNotMatch(page(foundationOnly.docs, 'decisions/two-approvals.md').body, /Overridden in scope/);
+  assert.doesNotMatch(page(foundationOnly.docs, 'rules/hotfix-rule.md').body, /Overridden in scope/);
+  assert.equal(foundationOnly.stats.skippedOverrides, 1);
+});
+
+test('span refs and non-file sources resolve', () => {
+  const { docs } = exportTo();
+  // [[extract:<id>|"quote"]]: the id stops at the pipe.
+  assert.deepEqual(page(docs, 'plays/cut-on-tuesday.md').fm.external_references, [
+    { url: 'https://example.com/repo/blob/main/docs/release.md', title: 'repo/docs/release.md', note: 'drafted from' },
+  ]);
+  // A web extract resolves to its source's identifier, which is already a URL.
+  assert.deepEqual(page(docs, 'rules/hotfix-rule.md').fm.external_references, [
+    { url: 'https://example.com/handbook', title: 'https://example.com/handbook', note: 'drafted from' },
+  ]);
 });
 
 test('refuses a Brain format version it does not know', () => {
@@ -112,6 +150,7 @@ test('--site scaffolds a hubs-only site and never overwrites existing files', ()
   assert.equal(readFileSync(join(dir, 'package.json'), 'utf8'), '{"name":"mine"}\n');
   const config = readFileSync(join(dir, 'astro.config.mjs'), 'utf8');
   assert.match(config, /"link":"\/decisions\/"/);
+  assert.match(config, /githubAlerts: true/);
   assert.ok(existsSync(join(dir, 'docs', 'decisions', 'two-approvals.md')));
   assert.ok(existsSync(join(dir, 'src', 'pages', 'api', 'pages', '[...slug].json.ts')));
 });
