@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+# doc-kitty is public, so the gate and the site build check it out at a pinned commit
+# and use its workspace toolkit: no GitHub Packages token is needed in CI.
+env:
+  DOC_KITTY_REF: de3468d9d4381d347b5a471f4a7e20f0d1e5fdcc
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -22,3 +27,84 @@ jobs:
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
+
+  action:
+    name: action (export only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - id: export
+        uses: ./
+        with:
+          brain-dir: test/fixtures/brain
+          site-dir: out/site
+          scopes: foundation, team-a
+          source-urls: |
+            repo/=https://example.com/repo/blob/main/
+            ^issues/([^/]+)/(\d+)-.*$=https://example.com/$1/issues/$2
+      - name: Check the action's output
+        env:
+          DOCS_DIR: ${{ steps.export.outputs.docs-dir }}
+        run: |
+          set -euo pipefail
+          test "$DOCS_DIR" = out/site/docs
+          test -f out/site/astro.config.mjs
+          test -f out/site/docs/decisions/team-a-rule.md
+          grep -q 'Overridden in scope \*\*Team A\*\*' out/site/docs/decisions/two-approvals.md
+
+  doc-kitty:
+    name: doc-kitty gate and site build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          repository: spec-kitty/doc-kitty
+          ref: ${{ env.DOC_KITTY_REF }}
+          path: doc-kitty
+      - run: corepack enable
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Install the exporter
+        run: pnpm install --frozen-lockfile
+      - name: Export the fixture (both scopes) as a doc-kitty workspace site
+        run: |
+          set -euo pipefail
+          # A workspace package.json, so the scaffolded site builds against the checked-out
+          # toolkit; the exporter never overwrites an existing package.json.
+          mkdir -p doc-kitty/brainsite
+          cat > doc-kitty/brainsite/package.json <<'JSON'
+          {
+            "name": "brainsite",
+            "private": true,
+            "type": "module",
+            "scripts": { "build": "astro build" },
+            "dependencies": {
+              "@astrojs/markdown-remark": "^7.3.3",
+              "@astrojs/sitemap": "^3.7.4",
+              "@spec-kitty/doc-toolkit": "workspace:*",
+              "astro": "^7.4.0"
+            },
+            "devDependencies": { "@astrojs/starlight": "^0.42.6" }
+          }
+          JSON
+          node bin/brain-to-dockitty.mjs test/fixtures/brain --site doc-kitty/brainsite \
+            --scope foundation --scope team-a \
+            --source-url 'repo/=https://example.com/repo/blob/main/'
+          sed -i 's/^  - "example"$/  - "example"\n  - "brainsite"/' doc-kitty/pnpm-workspace.yaml
+          grep -q '"brainsite"' doc-kitty/pnpm-workspace.yaml
+      - name: Install doc-kitty
+        working-directory: doc-kitty
+        run: pnpm install --no-frozen-lockfile
+      - name: Frontmatter gate
+        working-directory: doc-kitty
+        run: node src/scripts/validate-frontmatter.mjs brainsite/docs
+      - name: Site build
+        working-directory: doc-kitty
+        run: |
+          set -euo pipefail
+          pnpm --filter brainsite build
+          test -f brainsite/dist/llms.txt
+          test -f brainsite/dist/decisions/two-approvals/index.html
+          test -f brainsite/dist/api/content-graph.json

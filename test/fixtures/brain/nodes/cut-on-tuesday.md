@@ -11,5 +11,7 @@ edges:
     type: applies-under
   - to: two-approvals
     type: composes-with
+sources:
+  - '[[extract:ext-src-bulk-fixture-aaaa|"every second Tuesday"]]'
 ---
 Cut the release branch from main every second Tuesday.

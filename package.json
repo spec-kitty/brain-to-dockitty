@@ -1,13 +1,13 @@
 {
   "name": "@spec-kitty/brain-to-dockitty",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Export a Brain's ratified content as a DocKitty docs tree, ready for a doc-kitty site.",
   "type": "module",
   "license": "MIT",
   "author": "Spec Kitty, Inc.",
   "repository": { "type": "git", "url": "git+https://github.com/spec-kitty/brain-to-dockitty.git" },
   "bin": { "brain-to-dockitty": "bin/brain-to-dockitty.mjs" },
-  "files": ["bin", "README.md", "LICENSE"],
+  "files": ["bin", "docs", "action.yml", "README.md", "LICENSE"],
   "engines": { "node": ">=22" },
   "scripts": {
     "test": "node --test \"test/*.test.mjs\""

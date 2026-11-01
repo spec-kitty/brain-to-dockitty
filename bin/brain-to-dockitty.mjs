@@ -12,6 +12,12 @@
  *   docs/<role-section>/README.md   hub per role
  *   docs/<role-section>/<id>.md     one page per ratified node
  *
+ * Scopes beyond foundation are opt-in (--scope). When several are exported, a scoped
+ * page says which scope it applies in, and overrides (an `overrides` edge up the
+ * declaring node's scope chain, or an entity in overrides/) show as callouts on
+ * both the overriding and the overridden page. docs/brain-format.md lists exactly
+ * what is read.
+ *
  * With --site <dir>, the tree goes to <dir>/docs and a minimal doc-kitty site is
  * scaffolded around it (astro.config.mjs with a hubs-only sidebar, content config,
  * llms.txt / RSS / agent-API routes). Existing site files are left alone.
@@ -29,7 +35,7 @@ import { basename, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import YAML from 'yaml';
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 const SUPPORTED_SCHEMA = [1];
 const ROLES = ['frame', 'move', 'selector', 'commitment'];
 const ROLE_ORDER = { frame: 10, commitment: 20, selector: 30, move: 40 };
@@ -97,24 +103,57 @@ const pluralLabel = Object.fromEntries(ROLES.map((r) => [r, plural(roleLabel[r])
 const sectionOf = (role) => pluralLabel[role].toLowerCase().replace(/[^a-z0-9]+/g, '-');
 const titleCase = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
-const scopeDocs = readdirSync(join(brainDir, 'scopes')).filter((f) => f.endsWith('.md'))
-  .map((f) => splitFrontmatter(readFileSync(join(brainDir, 'scopes', f), 'utf8'), f).fm);
+const readDir = (dir) => (existsSync(join(brainDir, dir)) ? readdirSync(join(brainDir, dir)).filter((f) => f.endsWith('.md')) : []);
+const unquote = (s) => s.trim().replace(/^['"]|['"]$/g, '');
+/** A wikilink field (`[[id]]` or a bare id) as a bare id. */
+const bare = (ref) => String(ref ?? '').trim().replace(/^\[\[\s*|\s*\]\]$/g, '');
+
+const scopeDocs = readDir('scopes').map((f) => splitFrontmatter(readFileSync(join(brainDir, 'scopes', f), 'utf8'), f).fm);
 for (const s of scopes) if (!scopeDocs.some((d) => d.id === s)) throw new Error(`no scope ${s} in this Brain`);
+const scopeById = new Map(scopeDocs.map((d) => [d.id, d]));
+const scopeName = (id) => scopeById.get(id)?.display_name ?? id;
+/** A scope's ancestor chain, nearest first, ending at foundation. */
+function ancestors(scopeId) {
+  const out = [];
+  let s = scopeById.get(scopeId)?.parent_scope_id ?? null;
+  while (s && !out.includes(s)) {
+    out.push(s);
+    s = scopeById.get(s)?.parent_scope_id ?? null;
+  }
+  return out;
+}
+
+// Override entities (overrides/): a scope-specific divergence from a base node, with a required reason.
+const overrideEntities = readDir('overrides').map((f) => {
+  const { fm, body } = splitFrontmatter(readFileSync(join(brainDir, 'overrides', f), 'utf8'), f);
+  return { id: fm.id, title: fm.title, target: bare(fm.target_node), scope: fm.scope_id, reason: bare(fm.reason_ref), body: body.trim() };
+});
 
 // Extract id -> locator, scanned line by line so a large bulk source is never parsed whole.
+// A bulk-file extract resolves to its file; any other locator (web, pdf, mcp ...) to its source's identifier.
 const extractLoc = new Map();
-for (const f of readdirSync(join(brainDir, 'sources')).filter((x) => x.endsWith('.md'))) {
+for (const f of readDir('sources')) {
   const text = readFileSync(join(brainDir, 'sources', f), 'utf8');
   const srcId = basename(f, '.md');
+  let identifier = null;
   let cur = null;
+  let fences = 0;
   for (const line of text.split('\n')) {
-    let m = /^ {2}- id: (\S+)/.exec(line);
-    if (m) { cur = { source: srcId, path: null, chunk: null }; extractLoc.set(m[1], cur); continue; }
+    if (line === '---' && ++fences === 2) break; // end of frontmatter
+    let m = /^identifier: (.+)$/.exec(line);
+    if (m) { identifier = unquote(m[1]); continue; }
+    if ((m = /^ {2}- id: (\S+)/.exec(line))) {
+      cur = { source: srcId, kind: null, path: null, chunk: null, identifier: () => identifier };
+      extractLoc.set(unquote(m[1]), cur);
+      continue;
+    }
     if (!cur) continue;
-    if ((m = /^ {6}relativePath: (.+)$/.exec(line))) cur.path = m[1].trim().replace(/^['"]|['"]$/g, '');
+    if ((m = /^ {6}kind: (\S+)/.exec(line))) cur.kind = unquote(m[1]);
+    else if ((m = /^ {6}relativePath: (.+)$/.exec(line))) cur.path = unquote(m[1]);
     else if ((m = /^ {6}chunkIdx: (\d+)/.exec(line))) cur.chunk = Number(m[1]);
   }
 }
+const extractPath = (loc) => loc.path ?? (loc.kind !== 'bulk-file' ? loc.identifier() : null);
 
 const nodes = new Map();
 let skipped = { lifecycle: 0, scope: 0 };
@@ -144,8 +183,9 @@ function describe(fm, body) {
   if (d.length < 50) d = `${titleCase(roleLabel[fm.role])}: ${fm.title}. ${d}`.slice(0, 180);
   return d;
 }
-/** The first matching --source-url rule's URL for a source path, or null. */
+/** The first matching --source-url rule's URL for a source path, or null. A path that is already a URL is kept. */
 function sourceUrl(path) {
+  if (/^https?:\/\//.test(path)) return path;
   for (const r of sourceUrls) {
     if (r.re) {
       const m = r.re.exec(path);
@@ -170,7 +210,59 @@ mkdirSync(join(outDir, '_meta'), { recursive: true });
 mkdirSync(join(outDir, 'context'), { recursive: true });
 for (const r of ROLES) mkdirSync(join(outDir, sectionOf(r)), { recursive: true });
 
-const stats = { pages: 0, related: 0, droppedEdges: 0, sources: 0, unresolvedSources: 0, renderedReferences: 0, unlinkedSources: 0, bodyLinks: 0 };
+const stats = {
+  pages: 0, related: 0, droppedEdges: 0, sources: 0, unresolvedSources: 0, renderedReferences: 0, unlinkedSources: 0, bodyLinks: 0,
+  overrides: 0, misdeclaredOverrides: 0, skippedOverrides: 0,
+};
+
+const link = (id) => (nodes.has(id) ? `[${nodes.get(id).fm.title ?? id}](../${pageId(id)}.md)` : `\`${id}\``);
+const reasonText = (r) => (r ? ` Reason: ${link(r)}.` : '');
+const callout = (kind, lines) => [`> [!${kind}]`, ...lines.map((l) => (l ? `> ${l}` : '>'))].join('\n');
+
+// Overrides, rendered only when both sides are exported. An `overrides` edge counts when its target sits
+// strictly above the declaring node on that node's scope chain (Brain Kitty's precedence contract);
+// anything else is misdeclared and stays a plain related link.
+const overridesOut = new Map(); // node id -> [{ target, reason }]
+const overriddenBy = new Map(); // node id -> [{ by?, entity?, scope, reason }]
+const push = (map, k, v) => (map.has(k) ? map.get(k).push(v) : map.set(k, [v]));
+for (const [id, { fm }] of nodes) {
+  for (const e of fm.edges ?? []) {
+    if (e.type !== 'overrides' || !nodes.has(e.to)) continue;
+    const from = fm.scope_id ?? 'foundation';
+    if (!ancestors(from).includes(nodes.get(e.to).fm.scope_id ?? 'foundation')) { stats.misdeclaredOverrides++; continue; }
+    const reason = bare(e.reason_ref) || null;
+    push(overridesOut, id, { target: e.to, reason });
+    push(overriddenBy, e.to, { by: id, scope: from, reason });
+    stats.overrides++;
+  }
+}
+for (const o of overrideEntities) {
+  if (!scopes.has(o.scope) || !nodes.has(o.target)) { stats.skippedOverrides++; continue; }
+  push(overriddenBy, o.target, { entity: o, scope: o.scope, reason: o.reason || null });
+  stats.overrides++;
+}
+
+/** Callouts that go right under a page's title: its scope, and any override it declares or receives. */
+function scopeCallouts(id, fm) {
+  const blocks = [];
+  const scope = fm.scope_id ?? 'foundation';
+  if (scope !== 'foundation') {
+    blocks.push(callout('NOTE', [`Applies in scope **${scopeName(scope)}**, on top of ${ancestors(scope).map((s) => `**${scopeName(s)}**`).join(' and ')}.`]));
+  }
+  for (const o of overridesOut.get(id) ?? []) {
+    const ground = nodes.get(o.target).fm.scope_id ?? 'foundation';
+    blocks.push(callout('IMPORTANT', [`In scope **${scopeName(scope)}**, this ${roleLabel[fm.role]} overrides ${link(o.target)} from **${scopeName(ground)}**.${reasonText(o.reason)}`]));
+  }
+  for (const o of overriddenBy.get(id) ?? []) {
+    if (o.entity) {
+      blocks.push(callout('NOTE', [`Overridden in scope **${scopeName(o.scope)}**: **${o.entity.title}**.${reasonText(o.reason)}`,
+        ...(o.entity.body ? ['', ...o.entity.body.split('\n')] : [])]));
+    } else {
+      blocks.push(callout('NOTE', [`Overridden in scope **${scopeName(o.scope)}** by ${link(o.by)}.${reasonText(o.reason)}`]));
+    }
+  }
+  return blocks;
+}
 const brainBlock = (fm) => [
   'brain:',
   `  id: ${yamlStr(fm.id)}`,
@@ -192,11 +284,13 @@ for (const [id, { fm, body }] of nodes) {
   // `external_references` is what the page renders (doc-kitty shows no `sources`).
   const byFile = new Map();
   for (const ref of fm.sources ?? []) {
-    const m = /extract:([^\]\s#]+)/.exec(String(ref));
+    // `[[extract:<id>]]` or the span form `[[extract:<id>|"quote"]]`; the id stops at `|`.
+    const m = /extract:\s*([^\]\s#|]+)/.exec(String(ref));
     const loc = m && extractLoc.get(m[1]);
-    if (loc?.path) {
-      if (!byFile.has(loc.path)) byFile.set(loc.path, new Set());
-      byFile.get(loc.path).add((loc.chunk ?? 0) + 1);
+    const path = loc && extractPath(loc);
+    if (path) {
+      if (!byFile.has(path)) byFile.set(path, new Set());
+      byFile.get(path).add((loc.chunk ?? 0) + 1);
       stats.sources++;
     } else stats.unresolvedSources++;
   }
@@ -239,6 +333,11 @@ for (const [id, { fm, body }] of nodes) {
     return `[${nodes.get(t).fm.title ?? t}](../${pageId(t)}.md)`;
   });
   if (!/^#\s/m.test(out)) out = `# ${fm.title ?? id}\n\n${out}`;
+  const callouts = scopeCallouts(id, fm);
+  if (callouts.length) {
+    // Directly under the title, so a reader sees the scope and any override before the body.
+    out = out.replace(/^(#\s[^\n]*\n)/m, (h1) => `${h1}\n${callouts.join('\n\n')}\n`);
+  }
   const under = (incoming.get(id) ?? []).filter((e) => e.type === 'applies-under');
   if (fm.role === 'frame' && under.length) {
     const byRole = {};
@@ -311,7 +410,7 @@ if (siteDir) {
     'package.json': `${JSON.stringify({
       name: `${descriptor.displayName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-site`, private: true, type: 'module',
       scripts: { build: 'astro build', preview: 'astro preview' },
-      dependencies: { '@astrojs/sitemap': '^3.7.4', '@spec-kitty/doc-toolkit': values.toolkit, astro: '^7.4.0' },
+      dependencies: { '@astrojs/markdown-remark': '^7.3.3', '@astrojs/sitemap': '^3.7.4', '@spec-kitty/doc-toolkit': values.toolkit, astro: '^7.4.0' },
       devDependencies: { '@astrojs/starlight': '^0.42.6' },
     }, null, 2)}\n`,
     'astro.config.mjs': [
@@ -332,11 +431,14 @@ if (siteDir) {
       ...(base ? [`    base: ${JSON.stringify(base)},`] : []),
       '    theme: specKittyTheme,',
       "    indexBasename: ['README'],",
+      '    // Scope and override callouts use GitHub alert syntax (> [!NOTE]), so they render here and on GitHub.',
+      '    githubAlerts: true,',
       `    sidebar: ${JSON.stringify(sidebar)},`,
       '  }),',
       '});',
       '',
     ].join('\n'),
+    'tsconfig.json': `${JSON.stringify({ extends: 'astro/tsconfigs/strict', include: ['.astro/types.d.ts', '**/*'], exclude: ['dist'] }, null, 2)}\n`,
     'src/content.config.ts': [
       "import { defineCollection } from 'astro:content';",
       "import { docKittyDocsSchema, docKittyDocsLoader } from '@spec-kitty/doc-toolkit/schema';",
