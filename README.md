@@ -10,15 +10,26 @@ Brain; answers, checks and capabilities still run on the Brain itself.
 
 ## Quickstart
 
+The exporter isn't published to a package registry yet, so run it straight from this repository:
+
 ```sh
-pnpm dlx @spec-kitty/brain-to-dockitty ~/BrainKittyWorkspace/my-brain --site ./my-brain-site \
+pnpm dlx github:spec-kitty/brain-to-dockitty ~/BrainKittyWorkspace/my-brain --site ./my-brain-site \
   --source-url 'my-repo/=https://github.com/my-org/my-repo/blob/main/'
 cd my-brain-site
 pnpm install
 pnpm build
 ```
 
-`@spec-kitty/doc-toolkit` comes from the GitHub Packages registry. See doc-kitty's
+`npx github:spec-kitty/brain-to-dockitty …` works the same way. Both fetch the latest `main`; add `#<commit>` to the
+spec (for example `github:spec-kitty/brain-to-dockitty#9f62937`) to pin a version. To run from a clone instead:
+
+```sh
+git clone https://github.com/spec-kitty/brain-to-dockitty.git
+cd brain-to-dockitty && pnpm install
+node bin/brain-to-dockitty.mjs ~/BrainKittyWorkspace/my-brain --site ../my-brain-site
+```
+
+The generated site depends on `@spec-kitty/doc-toolkit`, which comes from the GitHub Packages registry. See doc-kitty's
 [consumer setup](https://github.com/spec-kitty/doc-kitty/blob/main/docs/guides/consumer-setup.md) for the
 `.npmrc` it needs.
 

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- README: the quickstart runs the exporter straight from GitHub (`pnpm dlx github:spec-kitty/brain-to-dockitty`), since
+  no package is published yet.
+
 ## 0.1.0 (2026-11-01)
 
 - First version: exports a Brain's ratified nodes (foundation scope by default) as a DocKitty `docs/` tree with one
